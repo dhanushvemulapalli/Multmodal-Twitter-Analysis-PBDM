@@ -5,7 +5,8 @@ matplotlib
 seaborn
 plotly
 wordcloud
-tweepy
+tweepy>=4.0.0
+twarc==2.14.0
 textblob
 nltk
 scikit-learn

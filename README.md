@@ -116,15 +116,36 @@ chmod +x scripts/setup.sh
 
 #### Java Compatibility Issues (Java 21+)
 
-If you encounter `java.lang.UnsupportedOperationException: getSubject is not supported`, this project automatically handles Java 21+ compatibility. However, if issues persist:
+**Streaming Mode on Windows with Java 21+:**
 
-1. **Use Java 11 or 17** (recommended):
-   - Download Java 11 or 17 from Oracle or OpenJDK
-   - Set `JAVA_HOME` environment variable to point to Java installation
+If you encounter `UnsatisfiedLinkError: 'boolean org.apache.hadoop.io.nativeio.NativeIO$Windows.access0'` when using streaming mode on Windows with Java 21+, this is a **known compatibility issue** between Spark/Hadoop and Java 21+ on Windows.
 
-2. **Windows Hadoop Warning**:
-   - The `HADOOP_HOME` warning is harmless for local development
-   - To suppress it, download winutils.exe and set `HADOOP_HOME` environment variable
+**This is NOT a code bug** - it's a Spark/Hadoop limitation.
+
+**Solutions:**
+1. **Use Java 11 or 17** (RECOMMENDED):
+   - Download from: https://adoptium.net/
+   - Set `JAVA_HOME` environment variable to Java 11/17 installation
+   - Example: `set JAVA_HOME=C:\Program Files\Java\jdk-17`
+
+2. **Use file-based mode** (works with any Java version):
+   ```bash
+   python src/main.py --mode file --input data/tweets.json
+   ```
+
+3. **Use WSL2** (Windows Subsystem for Linux):
+   - Run streaming in Linux environment to avoid Windows native library issues
+
+4. **Wait for Spark 4.0+**: Better Windows and Java 21+ support expected in 2024-2025
+
+**File-based mode works perfectly** with Java 21+ - only streaming mode has this limitation on Windows.
+
+**Other Java Issues:**
+- If you encounter `java.lang.UnsupportedOperationException: getSubject is not supported`, this project automatically handles Java 21+ compatibility. However, if issues persist, use Java 11 or 17.
+
+**Windows Hadoop Warning:**
+- The `HADOOP_HOME` warning is harmless for local development
+- To suppress it, download winutils.exe and set `HADOOP_HOME` environment variable
 
 #### Memory Issues
 
@@ -143,36 +164,103 @@ If you encounter out-of-memory errors:
 
 ## Usage
 
-### Basic Usage
-
-```bash
-python src/main.py --input data/tweets.json --output results/
-```
-
-### Command Line Options
-
-- `--input`: Path to input Twitter data file (JSON format)
-- `--output`: Path to output directory for results
-- `--mode`: Processing mode ('local' or 'cluster', default: 'local')
-- `--partitions`: Number of partitions for Spark (default: 4)
-- `--skip-visualization`: Skip visualization generation (faster for large datasets)
-
-### Examples
+### File-Based Analysis (Batch Mode)
 
 **Basic usage with sample data:**
 ```bash
-python src/main.py --input data/sample_tweets.json --output results/
+python src/main.py --mode file --input data/sample_tweets.json --output results/
 ```
 
 **With custom configuration:**
 ```bash
-python src/main.py --input data/tweets_sample.json --output results/ --mode local --partitions 4
+python src/main.py --mode file --input data/tweets_sample.json --output results/ --spark-mode local --partitions 4
 ```
 
 **Skip visualization (faster for large datasets):**
 ```bash
-python src/main.py --input data/tweets.json --output results/ --skip-visualization
+python src/main.py --mode file --input data/tweets.json --output results/ --skip-visualization
 ```
+
+### Real-Time Streaming Mode
+
+The project now supports real-time streaming of tweets from Twitter API v2. This mode connects to Twitter's filtered stream endpoint and processes tweets in real-time using Spark Structured Streaming.
+
+**Prerequisites for Streaming:**
+1. Twitter API v2 credentials (Bearer Token or API keys)
+2. Create a `.env` file in the project root with:
+   ```
+   TWITTER_BEARER_TOKEN=your_bearer_token
+   # OR
+   TWITTER_API_KEY=your_api_key
+   TWITTER_API_SECRET=your_api_secret
+   TWITTER_ACCESS_TOKEN=your_access_token
+   TWITTER_ACCESS_TOKEN_SECRET=your_access_token_secret
+   ```
+
+**Basic streaming usage:**
+```bash
+python src/main.py --mode stream --keyword "bitcoin"
+```
+
+**Streaming with custom configuration:**
+```bash
+python src/main.py --mode stream --keyword "elections" --output results/ --batch-interval 5 --partitions 4
+```
+
+**Streaming features:**
+- Real-time tweet collection from Twitter API v2 filtered stream
+- Mini-batch processing (configurable interval: 1-5 seconds)
+- Live sentiment and factuality analysis
+- Running statistics displayed in terminal
+- Results written to `results/live/` directory
+- Automatic checkpointing for fault tolerance
+- Fallback to local file streaming if API unavailable
+
+**Streaming Command Line Options:**
+- `--mode stream`: Enable streaming mode
+- `--keyword`: Keyword/topic to filter tweets (required for stream mode)
+- `--output`: Output directory (default: `results/`)
+- `--batch-interval`: Streaming batch interval in seconds (default: 3)
+- `--spark-mode`: Spark execution mode ('local' or 'cluster', default: 'local')
+- `--partitions`: Number of Spark partitions (default: 4)
+
+**Example streaming commands:**
+```bash
+# Stream tweets about bitcoin
+python src/main.py --mode stream --keyword "bitcoin"
+
+# Stream with 5-second batches
+python src/main.py --mode stream --keyword "elections" --batch-interval 5
+
+# Stream with custom output directory
+python src/main.py --mode stream --keyword "python" --output results/live_analysis/
+```
+
+**Streaming Output:**
+- Console: Real-time statistics every batch interval showing sentiment distribution
+- Files: Processed tweets written to `results/live/` in JSON format
+- Checkpoints: Stored in `checkpoints/` directory for fault tolerance
+
+**Stopping Streaming:**
+Press `Ctrl+C` to gracefully stop the streaming pipeline. All checkpoints are saved automatically.
+
+### Command Line Options Summary
+
+**File Mode:**
+- `--mode file`: Batch processing mode (default)
+- `--input`: Path to input Twitter data file (JSON format) - required for file mode
+- `--output`: Path to output directory for results
+- `--spark-mode`: Spark execution mode ('local' or 'cluster')
+- `--partitions`: Number of partitions for Spark (default: 4)
+- `--skip-visualization`: Skip visualization generation
+
+**Stream Mode:**
+- `--mode stream`: Real-time streaming mode
+- `--keyword`: Keyword/topic to stream tweets for - required for stream mode
+- `--output`: Path to output directory for results
+- `--batch-interval`: Streaming batch interval in seconds (default: 3)
+- `--spark-mode`: Spark execution mode ('local' or 'cluster')
+- `--partitions`: Number of partitions for Spark (default: 4)
 
 ## Data Format
 
