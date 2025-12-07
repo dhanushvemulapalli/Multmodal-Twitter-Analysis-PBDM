@@ -49,6 +49,12 @@ import time
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from dotenv import load_dotenv
+
+# Load environment variables from .env file in project root
+# This should be done before other modules that might need them are imported
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
+
 from config.config import SPARK_CONFIG, PROJECT_ROOT
 from src.data_ingestion import TwitterDataIngestion
 from src.sentiment_analysis import SentimentAnalyzer
@@ -168,7 +174,7 @@ def create_spark_session(mode: str = "local", partitions: int = 4, streaming: bo
         raise
 
 
-def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions: int, batch_interval: int = 3):
+def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions: int, batch_interval: int = 3, simulate: bool = False, max_tweets: int = None):
     """
     Run real-time streaming analysis on Twitter data
     
@@ -178,9 +184,13 @@ def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions
         mode: Spark execution mode
         partitions: Number of Spark partitions
         batch_interval: Streaming batch interval in seconds
+        simulate: Whether to simulate tweets
+        max_tweets: Maximum number of tweets to collect before stopping
     """
     print("=" * 60)
     print("Twitter Multimodal Analysis - STREAMING MODE")
+    if simulate:
+        print("SIMULATION MODE ENABLED - Generating fake tweets")
     print("=" * 60)
     print(f"Keyword: {keyword}")
     print(f"Output directory: {output_dir}")
@@ -209,7 +219,9 @@ def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions
     stream_producer = TwitterStreamProducer(
         keyword=keyword,
         output_dir=str(stream_data_dir),
-        batch_interval=batch_interval
+        batch_interval=batch_interval,
+        simulate=simulate,
+        max_tweets=max_tweets
     )
     
     # Start streaming
@@ -551,6 +563,17 @@ def main():
         action="store_true",
         help="Skip visualization generation (file mode only)"
     )
+    parser.add_argument(
+        "--simulate",
+        action="store_true",
+        help="Simulate tweets instead of connecting to Twitter API (useful for testing or when rate limited)"
+    )
+    parser.add_argument(
+        "--max-tweets",
+        type=int,
+        default=None,
+        help="Maximum number of tweets to collect before stopping (useful for Free Tier limits)"
+    )
     
     args = parser.parse_args()
     
@@ -567,7 +590,9 @@ def main():
             output_dir=output_dir,
             mode=args.spark_mode,
             partitions=args.partitions,
-            batch_interval=args.batch_interval
+            batch_interval=args.batch_interval,
+            simulate=args.simulate,
+            max_tweets=args.max_tweets
         )
     else:
         # File mode

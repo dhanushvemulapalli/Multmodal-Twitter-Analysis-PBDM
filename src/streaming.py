@@ -7,6 +7,7 @@ import json
 import time
 import threading
 import queue
+import random
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
@@ -41,7 +42,9 @@ class TwitterStreamProducer:
         output_dir: str = "stream_data",
         batch_interval: int = 3,
         max_retries: int = 5,
-        retry_delay: int = 5
+        retry_delay: int = 5,
+        simulate: bool = False,
+        max_tweets: int = None
     ):
         """
         Initialize Twitter stream producer
@@ -52,6 +55,8 @@ class TwitterStreamProducer:
             batch_interval: Interval in seconds between file writes
             max_retries: Maximum retry attempts for API calls
             retry_delay: Delay between retries in seconds
+            simulate: Whether to simulate tweets (for testing/demo)
+            max_tweets: Maximum number of tweets to collect before stopping
         """
         self.keyword = keyword
         self.output_dir = Path(output_dir)
@@ -59,6 +64,8 @@ class TwitterStreamProducer:
         self.batch_interval = batch_interval
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.simulate = simulate
+        self.max_tweets = max_tweets
         
         # Get API credentials
         self.api_key = os.getenv("TWITTER_API_KEY")
@@ -75,7 +82,34 @@ class TwitterStreamProducer:
         
         # Initialize API client
         self.client = None
-        self._init_client()
+        if not self.simulate:
+            self._init_client()
+            
+    def _generate_fake_tweet(self):
+        """Generate a fake tweet for simulation/testing"""
+        import random
+        import uuid
+        
+        tweet_id = str(uuid.uuid4().int)[:19]
+        
+        # Random sentiments/topics related to keyword
+        adjectives = ["amazing", "terrible", "volatile", "stable", "growing", "crashing", "interesting", "boring"]
+        verbs = ["buying", "selling", "holding", "watching", "ignoring", "analyzing"]
+        
+        text = f"Just {random.choice(verbs)} some {self.keyword}! It's looking {random.choice(adjectives)} today. #{self.keyword} #crypto"
+        
+        return {
+            "id": tweet_id,
+            "text": text,
+            "created_at": datetime.utcnow().isoformat(),
+            "user": {
+                "screen_name": f"user_{random.randint(1000, 9999)}",
+                "followers_count": random.randint(10, 100000)
+            },
+            "retweet_count": random.randint(0, 100),
+            "favorite_count": random.randint(0, 500),
+            "reply_count": random.randint(0, 50)
+        }
     
     def _init_client(self):
         """Initialize Twitter API client (prefer Tweepy v2, fallback to Twarc2)"""
@@ -245,6 +279,13 @@ class TwitterStreamProducer:
                         self.producer.error_count += 1
                         if self.producer.error_count % 10 == 0:
                             print(f"Error processing tweet: {e}")
+                    
+                    # Check max tweets limit
+                    if self.producer.max_tweets and self.producer.tweet_count >= self.producer.max_tweets:
+                        print(f"Reached max tweets limit ({self.producer.max_tweets}). Stopping stream.")
+                        self.producer.running = False
+                        self.disconnect()
+                        return
                 
                 def on_connection_error(self):
                     print("Connection error in stream")
@@ -269,8 +310,108 @@ class TwitterStreamProducer:
             import traceback
             traceback.print_exc()
             raise
+            raise
     
-    def _stream_tweets_twarc(self):
+    def _stream_tweets_polling(self):
+        """
+        Poll for tweets using search_recent_tweets (Fallback for Free Tier)
+        Mimics streaming by repeatedly searching for recent tweets
+        """
+        if not self.client:
+            return
+            
+        print("✓ Starting polling mode (using search_recent_tweets)")
+        print(f"  - Poll interval: {self.retry_delay}s")
+        print(f"  - Max tweets: {self.max_tweets if self.max_tweets else 'Unlimited'}")
+        
+        last_id = None
+        
+        while self.running:
+            try:
+                # Build query
+                query = f"{self.keyword} -is:retweet lang:en"
+                
+                # Search parameters
+                params = {
+                    "query": query,
+                    "max_results": 10,  # Small batch for polling
+                    "tweet_fields": ["created_at", "public_metrics", "author_id"],
+                    "expansions": ["author_id"],
+                    "user_fields": ["username", "public_metrics"]
+                }
+                
+                if last_id:
+                    params["since_id"] = last_id
+                
+                # Execute search
+                response = self.client.search_recent_tweets(**params)
+                
+                if response.data:
+                    # Update last_id to only get newer tweets next time
+                    last_id = response.meta.get("newest_id")
+                    
+                    # Process users
+                    users = {}
+                    if response.includes and "users" in response.includes:
+                        for u in response.includes["users"]:
+                            users[u.id] = u
+                    
+                    # Process tweets
+                    for tweet in response.data:
+                        try:
+                            # Format tweet data structure to match what _format_tweet_for_spark expects
+                            # We need to reconstruct the dict structure that Tweepy v2 usually returns
+                            tweet_dict = {
+                                "data": {
+                                    "id": str(tweet.id),
+                                    "text": tweet.text,
+                                    "created_at": tweet.created_at.isoformat() if tweet.created_at else datetime.utcnow().isoformat(),
+                                    "public_metrics": tweet.public_metrics,
+                                    "author_id": tweet.author_id
+                                },
+                                "includes": {
+                                    "users": []
+                                }
+                            }
+                            
+                            # Add user info if available
+                            if tweet.author_id and tweet.author_id in users:
+                                user = users[tweet.author_id]
+                                tweet_dict["includes"]["users"] = [{
+                                    "username": user.username,
+                                    "public_metrics": user.public_metrics
+                                }]
+                            
+                            formatted = self._format_tweet_for_spark(tweet_dict)
+                            self.tweet_queue.put(formatted)
+                            self.tweet_count += 1
+                            
+                            # Check max tweets limit
+                            if self.max_tweets and self.tweet_count >= self.max_tweets:
+                                print(f"Reached max tweets limit ({self.max_tweets}). Stopping poll.")
+                                self.running = False
+                                return
+                                
+                        except Exception as e:
+                            self.error_count += 1
+                            print(f"Error processing tweet: {e}")
+                            
+                    print(f"✓ Polled {len(response.data)} new tweets (Total: {self.tweet_count})")
+                
+                else:
+                    print(".", end="", flush=True)
+                
+                # Wait for next poll
+                time.sleep(self.retry_delay)
+                
+            except Exception as e:
+                print(f"\nPolling error: {e}")
+                if "429" in str(e):
+                    print("Rate limit hit. Sleeping for 60s...")
+                    time.sleep(60)
+                else:
+                    self.error_count += 1
+                    time.sleep(self.retry_delay)
         """Stream tweets using Twarc2"""
         if not self.client:
             return
@@ -282,16 +423,32 @@ class TwitterStreamProducer:
                 max_results=100
             ):
                 if "data" in response:
+                    # Create user lookup map from includes
+                    users = {}
+                    if "includes" in response and "users" in response["includes"]:
+                        for u in response["includes"]["users"]:
+                            users[u["id"]] = u
+                            
                     for tweet in response["data"]:
                         try:
-                            formatted = self._format_tweet_for_spark(response)
+                            # Inject user object if available
+                            if "author_id" in tweet and tweet["author_id"] in users:
+                                tweet["user"] = users[tweet["author_id"]]
+                                
+                            formatted = self._format_tweet_for_spark(tweet)
                             self.tweet_queue.put(formatted)
                             self.tweet_count += 1
                         except Exception as e:
                             self.error_count += 1
                             if self.error_count % 10 == 0:
                                 print(f"Error processing tweet: {e}")
-                
+                        
+                        # Check max tweets limit
+                        if self.max_tweets and self.tweet_count >= self.max_tweets:
+                            print(f"Reached max tweets limit ({self.max_tweets}). Stopping stream.")
+                            self.running = False
+                            return
+
                 # Rate limiting
                 time.sleep(1)
                 
@@ -327,18 +484,33 @@ class TwitterStreamProducer:
             
             return len(batch)
         return 0
-    
+
     def _stream_worker(self):
         """Worker thread for streaming tweets"""
         retry_count = 0
         
         while self.running:
             try:
-                if self.client and self.bearer_token:
-                    # Try Tweepy v2 streaming
-                    if TWEEPY_AVAILABLE:
-                        self._stream_tweets_tweepy()
-                    # Fallback to Twarc2
+                if self.simulate:
+                    # Simulation mode
+                    tweet = self._generate_fake_tweet()
+                    self.tweet_queue.put(tweet)
+                    self.tweet_count += 1
+                    time.sleep(random.uniform(0.1, 1.0)) # Random delay
+                    continue
+
+                if self.client:
+                    # Try Tweepy v2 streaming (requires Bearer Token)
+                    if TWEEPY_AVAILABLE and self.bearer_token:
+                        try:
+                            self._stream_tweets_tweepy()
+                        except Exception as e:
+                            if "403" in str(e):
+                                print("\nStreaming access denied (403). Falling back to Polling Mode (Free Tier compatible)...")
+                                self._stream_tweets_polling()
+                            else:
+                                raise e
+                    # Fallback to Twarc2 (can work with API keys)
                     elif TWARC_AVAILABLE:
                         self._stream_tweets_twarc()
                     else:
@@ -381,8 +553,8 @@ class TwitterStreamProducer:
         
         self.running = True
         
-        # Start streaming thread
-        if self.client:
+        # Start streaming thread (for both real API streaming and simulation)
+        if self.client or self.simulate:
             stream_thread = threading.Thread(target=self._stream_worker, daemon=True)
             stream_thread.start()
         
