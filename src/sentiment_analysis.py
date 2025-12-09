@@ -2,12 +2,10 @@
 Sentiment Analysis Module
 Uses VADER and TextBlob for sentiment detection
 """
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf, col, when, lit
-from pyspark.sql.types import StringType, DoubleType
 import nltk
 from nltk.sentiment import SentimentIntensityAnalyzer
-import pandas as pd
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lit, udf, when
 
 
 # Module-level lazy singletons to avoid capturing driver objects in UDFs
@@ -142,43 +140,77 @@ class SentimentAnalyzer:
         Returns:
             DataFrame with sentiment columns added
         """
-        # Spark-native heuristic sentiment (no UDFs)
-        from pyspark.sql.functions import lower, rlike, instr
-        text_col = lower(col("tweet_text"))
+        # specific check for streaming vs batch
+        is_streaming = df.isStreaming
+        
+        if is_streaming:
+            # Spark-native heuristic sentiment (no UDFs) for streaming to avoid serialization issues
+            from pyspark.sql.functions import instr, lower
+            text_col = lower(col("tweet_text"))
 
-        positive_regex = r"\\b(good|great|excellent|love|awesome|amazing|fantastic|happy|wonderful|nice)\\b"
-        negative_regex = r"\\b(bad|terrible|awful|hate|horrible|sad|worst|angry|ugly)\\b"
+            positive_regex = r"\\b(good|great|excellent|love|awesome|amazing|fantastic|happy|wonderful|nice)\\b"
+            negative_regex = r"\\b(bad|terrible|awful|hate|horrible|sad|worst|angry|ugly)\\b"
 
-        positive_cond = (
-            (instr(text_col, ":)") > 0) |
-            (instr(text_col, "🙂") > 0) |
-            (instr(text_col, "😀") > 0) |
-            (instr(text_col, "😊") > 0) |
-            (instr(text_col, "❤️") > 0) |
-            (instr(text_col, "👍") > 0) |
-            text_col.rlike(positive_regex)
-        )
-        negative_cond = (
-            (instr(text_col, ":(") > 0) |
-            (instr(text_col, "☹") > 0) |
-            (instr(text_col, "😞") > 0) |
-            (instr(text_col, "😡") > 0) |
-            (instr(text_col, "💔") > 0) |
-            (instr(text_col, "👎") > 0) |
-            text_col.rlike(negative_regex)
-        )
+            positive_cond = (
+                (instr(text_col, ":)") > 0) |
+                (instr(text_col, "🙂") > 0) |
+                (instr(text_col, "😀") > 0) |
+                (instr(text_col, "😊") > 0) |
+                (instr(text_col, "❤️") > 0) |
+                (instr(text_col, "👍") > 0) |
+                text_col.rlike(positive_regex)
+            )
+            negative_cond = (
+                (instr(text_col, ":(") > 0) |
+                (instr(text_col, "☹") > 0) |
+                (instr(text_col, "😞") > 0) |
+                (instr(text_col, "😡") > 0) |
+                (instr(text_col, "💔") > 0) |
+                (instr(text_col, "👎") > 0) |
+                text_col.rlike(negative_regex)
+            )
 
-        result_df = df.withColumn(
-            "sentiment_label",
-            when(positive_cond, lit("positive")).when(negative_cond, lit("negative")).otherwise(lit("neutral"))
-        ).withColumn(
-            "sentiment_compound", lit(0.0)
-        ).withColumn(
-            "sentiment_polarity", lit(0.0)
-        ).withColumn(
-            "sentiment_confidence",
-            when((col("sentiment_label") == "positive") | (col("sentiment_label") == "negative"), lit(0.5)).otherwise(lit(0.0))
-        )
+            result_df = df.withColumn(
+                "sentiment_label",
+                when(positive_cond, lit("positive")).when(negative_cond, lit("negative")).otherwise(lit("neutral"))
+            ).withColumn(
+                "sentiment_compound", lit(0.0)
+            ).withColumn(
+                "sentiment_polarity", lit(0.0)
+            ).withColumn(
+                "sentiment_confidence",
+                when((col("sentiment_label") == "positive") | (col("sentiment_label") == "negative"), lit(0.5)).otherwise(lit(0.0))
+            )
+        else:
+            # Use full VADER+TextBlob UDF for batch processing (Visualization step)
+            # Define UDF
+            from pyspark.sql.types import (
+                DoubleType,
+                StringType,
+                StructField,
+                StructType,
+            )
+            
+            schema = StructType([
+                StructField("label", StringType(), False),
+                StructField("compound", DoubleType(), False),
+                StructField("polarity", DoubleType(), False),
+                StructField("confidence", DoubleType(), False)
+            ])
+            
+            sentiment_udf = udf(_analyze_sentiment_combined_no_self, schema)
+            
+            # Apply UDF
+            result_df = df.withColumn("sentiment_struct", sentiment_udf(col("tweet_text")))
+            
+            # Extract fields
+            result_df = result_df.select(
+                "*",
+                col("sentiment_struct.label").alias("sentiment_label"),
+                col("sentiment_struct.compound").alias("sentiment_compound"),
+                col("sentiment_struct.polarity").alias("sentiment_polarity"),
+                col("sentiment_struct.confidence").alias("sentiment_confidence")
+            ).drop("sentiment_struct")
 
         # Ensure label is non-null to avoid aggregation issues downstream
         result_df = result_df.fillna({"sentiment_label": "neutral"})

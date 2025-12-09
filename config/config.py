@@ -1,8 +1,8 @@
 """
 Configuration settings for Twitter Data Analysis Project
 """
-import os
 from pathlib import Path
+
 
 # Project paths
 PROJECT_ROOT = Path(__file__).parent.parent

@@ -2,15 +2,21 @@
 Twitter Streaming Module for Real-Time Tweet Processing
 Uses Twitter API v2 filtered stream endpoint with PySpark Structured Streaming
 """
-import os
+import csv
 import json
-import time
-import threading
+import os
 import queue
 import random
-from pathlib import Path
-from typing import Optional, Dict, Any
+import threading
+import time
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict
+
+import requests
+
+
+DATASET_URL = "https://raw.githubusercontent.com/ruchitgandhi/Twitter-Airline-Sentiment-Analysis/master/Tweets.csv"
 
 try:
     import tweepy
@@ -25,6 +31,7 @@ except ImportError:
     TWARC_AVAILABLE = False
 
 from dotenv import load_dotenv
+
 
 # Load environment variables
 load_dotenv()
@@ -84,32 +91,72 @@ class TwitterStreamProducer:
         self.client = None
         if not self.simulate:
             self._init_client()
+        else:
+            self.simulation_tweets = []
+            self.simulation_index = 0
             
+    def _load_simulation_data(self):
+        """Download and load simulation dataset"""
+        data_dir = Path("data")
+        data_dir.mkdir(exist_ok=True)
+        dataset_path = data_dir / "airline_tweets.csv"
+        
+        # Download if not exists
+        if not dataset_path.exists():
+            print(f"Downloading simulation dataset from {DATASET_URL}...")
+            try:
+                response = requests.get(DATASET_URL)
+                response.raise_for_status()
+                with open(dataset_path, "wb") as f:
+                    f.write(response.content)
+                print("✓ Dataset downloaded successfully")
+            except Exception as e:
+                print(f"⚠ Failed to download dataset: {e}")
+                return False
+                
+        # Load dataset
+        try:
+            with open(dataset_path, "r", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                self.simulation_tweets = list(reader)
+            print(f"✓ Loaded {len(self.simulation_tweets)} tweets for simulation")
+            return True
+        except Exception as e:
+            print(f"⚠ Failed to load dataset: {e}")
+            return False
+
     def _generate_fake_tweet(self):
-        """Generate a fake tweet for simulation/testing"""
-        import random
+        """Get next tweet from simulation dataset"""
         import uuid
         
-        tweet_id = str(uuid.uuid4().int)[:19]
-        
-        # Random sentiments/topics related to keyword
-        adjectives = ["amazing", "terrible", "volatile", "stable", "growing", "crashing", "interesting", "boring"]
-        verbs = ["buying", "selling", "holding", "watching", "ignoring", "analyzing"]
-        
-        text = f"Just {random.choice(verbs)} some {self.keyword}! It's looking {random.choice(adjectives)} today. #{self.keyword} #crypto"
-        
-        return {
-            "id": tweet_id,
-            "text": text,
-            "created_at": datetime.utcnow().isoformat(),
-            "user": {
-                "screen_name": f"user_{random.randint(1000, 9999)}",
-                "followers_count": random.randint(10, 100000)
-            },
-            "retweet_count": random.randint(0, 100),
-            "favorite_count": random.randint(0, 500),
-            "reply_count": random.randint(0, 50)
-        }
+        if self.simulation_tweets:
+            # Get next tweet from dataset
+            row = self.simulation_tweets[self.simulation_index]
+            self.simulation_index = (self.simulation_index + 1) % len(self.simulation_tweets)
+            
+            tweet_text = row.get("text", "No text")
+            
+            return {
+                "id": row.get("tweet_id", str(uuid.uuid4().int)[:19]),
+                "text": tweet_text,
+                "created_at": datetime.utcnow().isoformat(),
+                "user": {
+                    "screen_name": row.get("name", f"user_{random.randint(1000, 9999)}"),
+                    "followers_count": random.randint(100, 50000)
+                },
+                "retweet_count": random.randint(0, 50),
+                "favorite_count": random.randint(0, 100),
+                "reply_count": 0
+            }
+        else:
+            # Fallback if dataset failed to load
+            return {
+                "id": str(uuid.uuid4().int)[:19],
+                "text": f"Simulation fallback tweet about {self.keyword} #{self.keyword}",
+                "created_at": datetime.utcnow().isoformat(),
+                "user": {"screen_name": "sim_user", "followers_count": 100},
+                "retweet_count": 0, "favorite_count": 0, "reply_count": 0
+            }
     
     def _init_client(self):
         """Initialize Twitter API client (prefer Tweepy v2, fallback to Twarc2)"""
@@ -493,6 +540,10 @@ class TwitterStreamProducer:
             try:
                 if self.simulate:
                     # Simulation mode
+                    if not self.simulation_tweets:
+                        # Try to load if not loaded (e.g. first run)
+                        self._load_simulation_data()
+                        
                     tweet = self._generate_fake_tweet()
                     self.tweet_queue.put(tweet)
                     self.tweet_count += 1

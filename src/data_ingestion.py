@@ -3,14 +3,17 @@ Twitter Data Ingestion and Preprocessing Module
 Handles loading and preprocessing Twitter data using PySpark
 """
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col, when, regexp_replace, lower, trim,
-    split, size, lit
-)
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType, DoubleType
 from pyspark.sql import functions as F
-import json
-from typing import Optional
+from pyspark.sql.functions import (
+    col,
+    lit,
+    lower,
+    regexp_replace,
+    size,
+    split,
+    trim,
+    when,
+)
 
 
 class TwitterDataIngestion:
@@ -126,7 +129,8 @@ class TwitterDataIngestion:
         Returns:
             Dictionary with statistics
         """
-        from pyspark.sql.functions import avg, sum as spark_sum
+        from pyspark.sql.functions import avg
+        from pyspark.sql.functions import sum as spark_sum
         
         stats = {
             "total_tweets": df.count(),

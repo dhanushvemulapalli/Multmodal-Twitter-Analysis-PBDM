@@ -2,10 +2,11 @@
 Main Execution Script for Twitter Multimodal Analysis
 """
 import argparse
-import sys
 import os
 import platform
+import sys
 from pathlib import Path
+
 
 # Set Java options for Java 21+ compatibility
 # Must be set before importing PySpark to affect the gateway process
@@ -41,26 +42,27 @@ if platform.system() == "Windows":
         os.environ["PYSPARK_SUBMIT_ARGS"] = f'--driver-java-options "{java_opts_str}" pyspark-shell'
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, window, count, avg, sum as spark_sum
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType, DoubleType
-import signal
-import time
+from pyspark.sql import functions as F
+from pyspark.sql.functions import avg, count, window
+from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
 
+
 # Load environment variables from .env file in project root
 # This should be done before other modules that might need them are imported
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
-from config.config import SPARK_CONFIG, PROJECT_ROOT
+from config.config import PROJECT_ROOT, SPARK_CONFIG
 from src.data_ingestion import TwitterDataIngestion
-from src.sentiment_analysis import SentimentAnalyzer
 from src.factuality_detection import FactualityDetector
+from src.sentiment_analysis import SentimentAnalyzer
+from src.streaming import TwitterStreamProducer
 from src.visualization import Visualizer
-from src.streaming import TwitterStreamProducer, LocalFileStreamProducer
 
 
 def create_spark_session(mode: str = "local", partitions: int = 4, streaming: bool = False):
@@ -174,7 +176,7 @@ def create_spark_session(mode: str = "local", partitions: int = 4, streaming: bo
         raise
 
 
-def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions: int, batch_interval: int = 3, simulate: bool = False, max_tweets: int = None):
+def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions: int, batch_interval: int = 3, simulate: bool = False, max_tweets: int = None, max_iterations: int = None):
     """
     Run real-time streaming analysis on Twitter data
     
@@ -186,6 +188,7 @@ def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions
         batch_interval: Streaming batch interval in seconds
         simulate: Whether to simulate tweets
         max_tweets: Maximum number of tweets to collect before stopping
+        max_iterations: Maximum number of batch iterations before stopping
     """
     print("=" * 60)
     print("Twitter Multimodal Analysis - STREAMING MODE")
@@ -201,12 +204,23 @@ def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions
     
     # Create directories
     checkpoint_dir = PROJECT_ROOT / "checkpoints"
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    
     stream_data_dir = PROJECT_ROOT / "stream_data"
-    stream_data_dir.mkdir(parents=True, exist_ok=True)
-    
     live_results_dir = output_dir / "live"
+    
+    # Clean up stale checkpoints to avoid metadata errors
+    import shutil
+    if checkpoint_dir.exists():
+        print("\nCleaning stale checkpoints...")
+        shutil.rmtree(checkpoint_dir)
+    if (live_results_dir / "_spark_metadata").exists():
+        shutil.rmtree(live_results_dir / "_spark_metadata")
+    if stream_data_dir.exists():
+        print("Cleaning stale stream data...")
+        shutil.rmtree(stream_data_dir)
+    
+    # Now create fresh directories
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    stream_data_dir.mkdir(parents=True, exist_ok=True)
     live_results_dir.mkdir(parents=True, exist_ok=True)
     
     # Create Spark session for streaming
@@ -366,14 +380,23 @@ def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions
         
         print("[OK] Streaming queries started")
         print("\n[4/4] Processing live tweets...")
+        if max_iterations:
+            print(f"Will stop after {max_iterations} iterations")
         print("Press Ctrl+C to stop streaming\n")
         
         # Print running statistics
         start_time = time.time()
+        iteration_count = 0
         while True:
             time.sleep(batch_interval)
             elapsed = int(time.time() - start_time)
-            print(f"\n[{elapsed}s] Tweets collected: {stream_producer.tweet_count} | Errors: {stream_producer.error_count}")
+            iteration_count += 1
+            print(f"\n[{elapsed}s] Iteration {iteration_count} | Tweets collected: {stream_producer.tweet_count} | Errors: {stream_producer.error_count}")
+            
+            # Check max iterations limit
+            if max_iterations and iteration_count >= max_iterations:
+                print(f"\nReached max iterations ({max_iterations}). Stopping streaming...")
+                break
             
             # Check if queries are still active
             if not console_query.isActive or not results_query.isActive:
@@ -398,6 +421,76 @@ def run_streaming_analysis(keyword: str, output_dir: Path, mode: str, partitions
                 results_query.stop()
         except:
             pass
+        
+        # Generate visualizations from collected data
+        print("\n[5/5] Generating visualizations and reports...")
+        try:
+            # Wait a moment for final writes to complete
+            time.sleep(2)
+            
+            # Check if we have any collected data
+            result_files = list(live_results_dir.glob("*.json"))
+            if result_files:
+                print(f"Found {len(result_files)} result files")
+                
+                # Create new Spark session for batch processing
+                viz_spark = create_spark_session(mode, partitions, streaming=False)
+                
+                try:
+                    # Load all collected data
+                    all_data_df = viz_spark.read.json(str(live_results_dir / "*.json"))
+                    data_count = all_data_df.count()
+                    print(f"Loaded {data_count} tweets for visualization")
+                    
+                    if data_count > 0:
+                        # Re-run sentiment analysis on the collected batch data
+                        # This works around the limitation of streaming mode using weak heuristics
+                        print("Re-analyzing sentiment for final report...")
+                        from src.sentiment_analysis import SentimentAnalyzer
+                        analyzer = SentimentAnalyzer(viz_spark)
+                        
+                        # Drop existing sentiment columns to avoid ambiguous reference errors
+                        cols_to_drop = ["sentiment_label", "sentiment_compound", "sentiment_polarity", "sentiment_confidence"]
+                        clean_df = all_data_df.drop(*cols_to_drop)
+                        
+                        all_data_df = analyzer.analyze_sentiment(clean_df)
+                        
+                        # Generate visualizations
+                        visualizer = Visualizer(viz_spark, str(output_dir))
+                        
+                        visualizer.plot_sentiment_distribution(all_data_df)
+                        visualizer.plot_factuality_distribution(all_data_df)
+                        visualizer.plot_sentiment_vs_factuality(all_data_df)
+                        visualizer.plot_engagement_analysis(all_data_df)
+                        
+                        # Generate word clouds if enough data
+                        if data_count >= 10:
+                            visualizer.create_wordcloud(all_data_df)
+                            positive_count = all_data_df.filter(F.col("sentiment_label") == "positive").count()
+                            negative_count = all_data_df.filter(F.col("sentiment_label") == "negative").count()
+                            if positive_count >= 5:
+                                visualizer.create_wordcloud(all_data_df, sentiment="positive")
+                            if negative_count >= 5:
+                                visualizer.create_wordcloud(all_data_df, sentiment="negative")
+                        
+                        # Generate summary report
+                        visualizer.generate_summary_report(all_data_df)
+                        
+                        print("[OK] All visualizations and reports generated")
+                        print(f"\nResults saved to: {output_dir}")
+                        print(f"Open {output_dir}/summary_report.html in your browser to view results")
+                    else:
+                        print("No data collected for visualization")
+                except Exception as viz_error:
+                    print(f"Error generating visualizations: {viz_error}")
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    viz_spark.stop()
+            else:
+                print("No result files found. Skipping visualization.")
+        except Exception as cleanup_error:
+            print(f"Error during visualization: {cleanup_error}")
         
         spark.stop()
         print("\n[OK] Streaming stopped. Spark session closed.")
@@ -458,9 +551,9 @@ def run_file_analysis(args):
         print("\nSentiment Distribution:")
         sentiment_dist.show(truncate=False)
         
-        # Factuality detection
+        # Factuality detection (ML enabled for file/batch mode)
         print("\n[4/5] Performing factuality detection...")
-        factuality_detector = FactualityDetector(spark)
+        factuality_detector = FactualityDetector(spark, use_ml=True, use_ml_for_streaming=True)
         df = factuality_detector.detect_factuality(df)
         print("[OK] Factuality detection completed")
         
@@ -569,6 +662,12 @@ def main():
         help="Simulate tweets instead of connecting to Twitter API (useful for testing or when rate limited)"
     )
     parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=None,
+        help="Maximum number of batch iterations before stopping (stream mode only)"
+    )
+    parser.add_argument(
         "--max-tweets",
         type=int,
         default=None,
@@ -592,7 +691,8 @@ def main():
             partitions=args.partitions,
             batch_interval=args.batch_interval,
             simulate=args.simulate,
-            max_tweets=args.max_tweets
+            max_tweets=args.max_tweets,
+            max_iterations=args.max_iterations
         )
     else:
         # File mode

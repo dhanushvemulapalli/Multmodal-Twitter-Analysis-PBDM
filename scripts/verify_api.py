@@ -1,7 +1,8 @@
 import os
+
 import tweepy
 from dotenv import load_dotenv
-import sys
+
 
 def verify_api():
     load_dotenv()

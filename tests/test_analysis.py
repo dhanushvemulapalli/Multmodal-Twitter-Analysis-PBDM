@@ -2,15 +2,16 @@
 Unit tests for sentiment analysis and factuality detection
 Tests core logic without PySpark dependencies
 """
-import unittest
 import sys
+import unittest
 from pathlib import Path
+
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.sentiment_analysis import SentimentAnalyzer
 from src.factuality_detection import FactualityDetector
+from src.sentiment_analysis import SentimentAnalyzer
 
 
 class TestSentimentAnalysis(unittest.TestCase):
@@ -93,7 +94,7 @@ class TestSentimentAnalysis(unittest.TestCase):
     def _analyze_sentiment(self, text):
         """Helper method to analyze sentiment"""
         from textblob import TextBlob
-        
+
         # Get VADER scores
         vader_scores = self.analyzer.vader.polarity_scores(text)
         compound = vader_scores["compound"]
@@ -230,7 +231,7 @@ class TestFactualityDetection(unittest.TestCase):
     def test_factuality_reliability_labels(self):
         """Test that reliability labels are correctly assigned"""
         from config.config import FACTUALITY_THRESHOLDS
-        
+
         # High reliability
         score_high, label_high, _, _, _ = self.detector._calculate_factuality_score(
             text="Verified and confirmed by official sources",

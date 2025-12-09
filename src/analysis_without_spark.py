@@ -2,20 +2,22 @@
 Standalone Twitter Analysis without PySpark
 Produces the same analysis results using regular Python/pandas
 """
-import json
 import argparse
-from pathlib import Path
-from typing import List, Dict
-import pandas as pd
-from textblob import TextBlob
-from nltk.sentiment import SentimentIntensityAnalyzer
+import json
 import math
 import sys
+from pathlib import Path
+from typing import Dict, List
+
+import pandas as pd
+from nltk.sentiment import SentimentIntensityAnalyzer
+from textblob import TextBlob
+
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.config import FACT_CHECK_KEYWORDS, FACTUALITY_THRESHOLDS, SENTIMENT_THRESHOLDS
+from config.config import FACTUALITY_THRESHOLDS, SENTIMENT_THRESHOLDS
 
 
 def load_json_data(file_path: str) -> List[Dict]:

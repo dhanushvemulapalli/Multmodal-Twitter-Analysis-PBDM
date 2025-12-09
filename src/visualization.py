@@ -2,17 +2,15 @@
 Visualization Module
 Creates visualizations and reports from analysis results
 """
+from pathlib import Path
+
 import matplotlib.pyplot as plt
-import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from wordcloud import WordCloud
-import pandas as pd
-from pathlib import Path
+import seaborn as sns
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, count, avg, when
-import numpy as np
+from pyspark.sql.functions import avg, col, count
+from wordcloud import WordCloud
 
 
 class Visualizer:
